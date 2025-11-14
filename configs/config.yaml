@@ -1,0 +1,12 @@
+dns:
+  listen: ":53"
+  upstreams:
+    - "https://cloudflare-dns.com/dns-query"
+    - "https://dns.quad9.net/dns-query"
+
+proxy:
+  listen: ":3128"
+  socks5_upstream: ""
+
+api:
+  listen: ":8080"
