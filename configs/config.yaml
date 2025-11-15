@@ -3,6 +3,9 @@ dns:
   upstreams:
     - "https://cloudflare-dns.com/dns-query"
     - "https://dns.google/dns-query"
+  timeout: 5s
+  cache_size: 10000
+  cache_ttl: 3600
 
 proxy:
   listen: ":3128"
@@ -26,7 +29,9 @@ api:
   listen: ":8000"
 
 docker_container:
-  name: "privacy-hub"
+  name: "privacy-hub-dns"
   listen: 9000
+  network: "bridge"
+  restart_policy: "unless-stopped"
   
 

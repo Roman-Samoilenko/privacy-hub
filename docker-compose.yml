@@ -1,0 +1,11 @@
+version: "3.9"
+
+services:
+  dns:
+    build: .
+    container_name: privacy-hub-dns
+    restart: unless-stopped
+    ports:
+      - "8853:8853/udp"
+    volumes:
+      - ./configs/config.yaml:/app/config.yaml:ro

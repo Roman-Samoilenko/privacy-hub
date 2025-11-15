@@ -1,0 +1,10 @@
+FROM golang:1.21-alpine
+
+WORKDIR /app
+COPY . .
+RUN go build -o dns-server ./cmd/dnsserver
+
+
+EXPOSE 53/udp 53/tcp
+
+CMD ["./dns-server"]
