@@ -1,12 +1,32 @@
 dns:
-  listen: ":53"
+  listen: ":8853"
   upstreams:
     - "https://cloudflare-dns.com/dns-query"
-    - "https://dns.quad9.net/dns-query"
+    - "https://dns.google/dns-query"
 
 proxy:
   listen: ":3128"
-  socks5_upstream: ""
+  filter_headers: true
+  user_agent: "Privacy-Browser/1.0 privacy-hub"
+  filter_list_headers:
+    - "X-Forwarded-For"
+    - "Via"
+    - "Forwarded"
+    - "Client-IP"
+    - "True-Client-IP"
+    - "X-Real-IP"
+    - "X-Client-IP"
+    - "X-Forwarded"
+    - "Proxy-Connection"
+    - "WL-Proxy-Client-IP"
+    - "HTTP_CLIENT_IP"
+    - "HTTP_X_FORWARDED_FOR"
 
 api:
-  listen: ":8080"
+  listen: ":8000"
+
+docker_container:
+  name: "privacy-hub"
+  listen: 9000
+  
+

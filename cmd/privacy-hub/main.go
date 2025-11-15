@@ -1,12 +1,11 @@
 package main
 
 import (
-	"log"
-
-	"privacy-hub/internal/supervisor"
+	"github.com/Roman-Samoilenko/privacy-hub/internal/logger"
+	"github.com/Roman-Samoilenko/privacy-hub/internal/supervisor"
 )
 
 func main() {
-	log.Println("Starting privacy-hub...")
+	logger.Info("Starting privacy-hub...")
 	supervisor.Start()
 }
