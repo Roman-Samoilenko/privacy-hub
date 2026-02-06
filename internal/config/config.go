@@ -35,7 +35,6 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
-
 	path := filepath.Join("configs", "config.yaml")
 
 	conf, err := os.ReadFile(path)
@@ -49,7 +48,7 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	logger.Debug("\nConfiguration:\n"+
+	logger.Debugf("\nConfiguration:\n"+
 		"  DNS:\n"+
 		"    Listen:    %s\n"+
 		"    Upstreams: %v\n"+

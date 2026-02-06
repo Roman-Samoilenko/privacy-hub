@@ -6,6 +6,6 @@ import (
 )
 
 func main() {
-	logger.Info("Starting privacy-hub...")
+	logger.Infof("Starting privacy-hub...")
 	supervisor.Start()
 }

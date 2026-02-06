@@ -13,6 +13,10 @@ import (
 
 // TODO: implement HTTPS, SOCKS proxy
 
+const (
+	ShutdownTimeout = 5 * time.Second
+)
+
 func Start(ctx context.Context, proxyConf config.ProxyConfig) error {
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Verbose = true
@@ -32,12 +36,12 @@ func Start(ctx context.Context, proxyConf config.ProxyConfig) error {
 		Handler: proxy,
 	}
 
-	logger.Info("Starting Proxy server on %s", proxyConf.Listen)
+	logger.Infof("Starting Proxy server on %s", proxyConf.Listen)
 
 	errChan := make(chan error, 1)
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("Proxy failed: %v", err)
+			logger.Errorf("Proxy failed: %v", err)
 			errChan <- err
 		}
 	}()
@@ -46,14 +50,16 @@ func Start(ctx context.Context, proxyConf config.ProxyConfig) error {
 	case err := <-errChan:
 		return err
 	case <-ctx.Done():
-		logger.Info("Shutting down proxy server...")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		logger.Infof("Shutting down proxy server...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
 		defer cancel()
 		return server.Shutdown(shutdownCtx)
 	}
 }
 
-func newUserAgentSetter(userAgent string) func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+func newUserAgentSetter(
+	userAgent string,
+) func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 	return func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 		if userAgent == "" {
 			return req, nil
@@ -63,7 +69,9 @@ func newUserAgentSetter(userAgent string) func(req *http.Request, ctx *goproxy.P
 	}
 }
 
-func newHeaderFilter(filterList []string) func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+func newHeaderFilter(
+	filterList []string,
+) func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 	return func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 		for _, header := range filterList {
 			req.Header.Del(header)

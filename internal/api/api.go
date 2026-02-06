@@ -1,4 +1,3 @@
-// api/api.go
 package api
 
 import (
@@ -14,16 +13,18 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 )
 
-// CreateRouter создает и настраивает роутер
+const (
+	APITimeout      = 60 * time.Second
+	ShutdownTimeout = 5 * time.Second
+)
+
 func CreateRouter() http.Handler {
 	r := chi.NewRouter()
 
-	// Middleware
 	r.Use(loggingMiddleware)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
+	r.Use(middleware.Timeout(APITimeout))
 
-	// Routes
 	r.Get("/health", healthHandler)
 	r.Get("/config", configHandler)
 	r.Post("/ready", readyHandler)
@@ -38,12 +39,12 @@ func Start(ctx context.Context, apiConf config.APIConfig) error {
 		Handler: CreateRouter(),
 	}
 
-	logger.Info("Starting HTTP server on %s", server.Addr)
+	logger.Infof("Starting HTTP server on %s", server.Addr)
 
 	errChan := make(chan error, 1)
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("Server error: %v", err)
+			logger.Errorf("Server error: %v", err)
 			errChan <- err
 		}
 	}()
@@ -52,8 +53,8 @@ func Start(ctx context.Context, apiConf config.APIConfig) error {
 	case err := <-errChan:
 		return err
 	case <-ctx.Done():
-		logger.Info("Shutting down API server...")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		logger.Infof("Shutting down API server...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
 		defer cancel()
 		return server.Shutdown(shutdownCtx)
 	}
@@ -65,7 +66,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 		next.ServeHTTP(ww, r)
 		duration := time.Since(start)
-		logger.Info("HTTP %d %s %s completed in %v",
+		logger.Infof("HTTP %d %s %s completed in %v",
 			ww.Status(),
 			r.Method,
 			r.URL.Path,
@@ -76,45 +77,57 @@ func loggingMiddleware(next http.Handler) http.Handler {
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
+	_, err := w.Write([]byte("OK"))
+	if err != nil {
+		logger.Errorf("Failed to write health response: %v", err)
+	}
 }
 
 func configHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Current configuration"))
+	_, err := w.Write([]byte("Current configuration"))
+	if err != nil {
+		logger.Errorf("Failed to write config response: %v", err)
+	}
 }
 
 func restartHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Service is restarting"))
-	logger.Warn("Restart endpoint hit - service restarting")
+	_, err := w.Write([]byte("Service is restarting"))
+	if err != nil {
+		logger.Errorf("Failed to write restart response: %v", err)
+	}
+	logger.Warnf("Restart endpoint hit - service restarting")
 }
 
 var ReadyChan = make(chan bool)
 
 func readyHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("The container is ready"))
-	logger.Info("Readiness check passed")
+	_, err := w.Write([]byte("The container is ready"))
+	if err != nil {
+		logger.Errorf("Failed to write readiness response: %v", err)
+	}
+	logger.Infof("Readiness check passed")
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		logger.Error("Failed to read readiness request body: %v", err)
+		logger.Errorf("Failed to read readiness request body: %v", err)
 		return
 	}
 
-	logger.Debug("Readiness request body: %s", string(body))
+	logger.Debugf("Readiness request body: %s", string(body))
 
 	var data map[string]bool
 	err = json.Unmarshal(body, &data)
 	if err != nil {
-		logger.Error("Failed to parse readiness request body: %v", err)
+		logger.Errorf("Failed to parse readiness request body: %v", err)
 		return
 	}
 
 	ready, exists := data["ready"]
 	if !exists {
-		logger.Error("Readiness request body does not contain 'ready' field")
+		logger.Errorf("Readiness request body does not contain 'ready' field")
 		return
 	}
 
