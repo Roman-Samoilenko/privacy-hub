@@ -4,55 +4,111 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
+	"sync"
+)
+
+type LogLevel int
+
+const (
+	DEBUG LogLevel = iota
+	INFO
+	WARN
+	ERROR
+)
+
+var levelNames = map[LogLevel]string{
+	DEBUG: "DEBUG",
+	INFO:  "INFO",
+	WARN:  "WARN",
+	ERROR: "ERROR",
+}
+
+var levelColors = map[LogLevel]string{
+	DEBUG: "\033[34m", // Blue
+	INFO:  "\033[32m", // Green
+	WARN:  "\033[33m", // Yellow
+	ERROR: "\033[31m", // Red
+}
+
+const (
+	colorReset   = "\033[0m"
+	colorSuccess = "\033[36m" // Cyan
 )
 
 type Logger struct {
-	log *log.Logger
+	log   *log.Logger
+	level LogLevel
+	mu    sync.RWMutex
 }
 
 var globalLogger *Logger
+var once sync.Once
 
-func newLogger() *Logger {
-	globalLogger = &Logger{
-		log: log.New(os.Stdout, "", log.Ltime|log.Lshortfile),
+func init() {
+	once.Do(func() {
+		globalLogger = &Logger{
+			log:   log.New(os.Stdout, "", log.Ltime|log.Lshortfile),
+			level: INFO,
+		}
+	})
+}
+
+func SetLevel(levelStr string) {
+	globalLogger.mu.Lock()
+	defer globalLogger.mu.Unlock()
+
+	switch strings.ToLower(levelStr) {
+	case "debug":
+		globalLogger.level = DEBUG
+	case "info":
+		globalLogger.level = INFO
+	case "warn", "warning":
+		globalLogger.level = WARN
+	case "error":
+		globalLogger.level = ERROR
+	default:
+		globalLogger.level = INFO
 	}
-	return globalLogger
 }
 
-func (l *Logger) infof(format string, v ...interface{}) {
-	message := fmt.Sprintf(format, v...)
-	l.log.Printf("\033[32mINFO\033[0m: %s", message)
-}
+func (l *Logger) logf(level LogLevel, format string, v ...interface{}) {
+	l.mu.RLock()
+	currentLevel := l.level
+	l.mu.RUnlock()
 
-func (l *Logger) errorf(format string, v ...interface{}) {
-	message := fmt.Sprintf(format, v...)
-	l.log.Printf("\033[31mERROR\033[0m: %s", message)
-}
+	if level < currentLevel {
+		return
+	}
 
-func (l *Logger) warnf(format string, v ...interface{}) {
 	message := fmt.Sprintf(format, v...)
-	l.log.Printf("\033[33mWARN\033[0m: %s", message)
-}
+	color := levelColors[level]
+	levelName := levelNames[level]
 
-func (l *Logger) debugf(format string, v ...interface{}) {
-	message := fmt.Sprintf(format, v...)
-	l.log.Printf("\033[34mDEBUG\033[0m: %s", message)
+	l.log.Printf("%s%s%s: %s", color, levelName, colorReset, message)
 }
 
 func (l *Logger) successf(format string, v ...interface{}) {
 	message := fmt.Sprintf(format, v...)
-	l.log.Printf("\033[36mSUCCESS\033[0m: %s", message)
+	l.log.Printf("%sSUCCESS%s: %s", colorSuccess, colorReset, message)
 }
 
-func get() *Logger {
-	if globalLogger == nil {
-		return newLogger()
-	}
-	return globalLogger
+func Debugf(format string, v ...interface{}) {
+	globalLogger.logf(DEBUG, format, v...)
 }
 
-func Infof(format string, v ...interface{})    { get().infof(format, v...) }
-func Errorf(format string, v ...interface{})   { get().errorf(format, v...) }
-func Warnf(format string, v ...interface{})    { get().warnf(format, v...) }
-func Debugf(format string, v ...interface{})   { get().debugf(format, v...) }
-func Successf(format string, v ...interface{}) { get().successf(format, v...) }
+func Infof(format string, v ...interface{}) {
+	globalLogger.logf(INFO, format, v...)
+}
+
+func Warnf(format string, v ...interface{}) {
+	globalLogger.logf(WARN, format, v...)
+}
+
+func Errorf(format string, v ...interface{}) {
+	globalLogger.logf(ERROR, format, v...)
+}
+
+func Successf(format string, v ...interface{}) {
+	globalLogger.successf(format, v...)
+}

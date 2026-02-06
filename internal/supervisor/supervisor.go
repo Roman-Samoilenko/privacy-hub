@@ -2,10 +2,8 @@ package supervisor
 
 import (
 	"context"
-	"os"
-	"os/signal"
+	"fmt"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/Roman-Samoilenko/privacy-hub/internal/api"
@@ -15,103 +13,139 @@ import (
 	"github.com/Roman-Samoilenko/privacy-hub/internal/proxyserver"
 )
 
-var running bool
-var mu sync.Mutex
-var wg sync.WaitGroup
+type Supervisor struct {
+	cfg         *config.Config
+	ctx         context.Context
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	dockerMgr   *hubctl.DockerManager
+	iptablesMgr *hubctl.IPTablesManager
+	running     bool
+	mu          sync.Mutex
+}
 
-const (
-	ShutdownTimeout = 10 * time.Second
-)
+func New(cfg *config.Config) *Supervisor {
+	ctx, cancel := context.WithCancel(context.Background())
 
-func Start() {
-	mu.Lock()
-	if running {
-		logger.Warnf("Supervisor is already running")
-		mu.Unlock()
-		return
+	dockerMgr, err := hubctl.NewDockerManager(cfg.DockerContainer)
+	if err != nil {
+		logger.Errorf("Failed to create docker manager: %v", err)
+		cancel()
+		return nil
 	}
-	running = true
-	mu.Unlock()
+
+	return &Supervisor{
+		cfg:         cfg,
+		ctx:         ctx,
+		cancel:      cancel,
+		dockerMgr:   dockerMgr,
+		iptablesMgr: hubctl.NewIPTablesManager(cfg.DockerContainer),
+	}
+}
+
+func (s *Supervisor) Start() error {
+	s.mu.Lock()
+	if s.running {
+		s.mu.Unlock()
+		return fmt.Errorf("supervisor already running")
+	}
+	s.running = true
+	s.mu.Unlock()
 
 	logger.Infof("Starting supervisor...")
 
-	cfg, err := config.Load()
-	if err != nil {
-		logger.Errorf("Failed to load configuration: %v", err)
-		os.Exit(1)
+	// Start DNS container
+	if err := s.dockerMgr.Start(s.ctx); err != nil {
+		return fmt.Errorf("failed to start DNS container: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Wait for container to be ready
+	if err := s.dockerMgr.WaitReady(s.ctx, 30*time.Second); err != nil {
+		return fmt.Errorf("DNS container not ready: %v", err)
+	}
 
-	wg.Add(1)
+	// Setup iptables
+	if err := s.iptablesMgr.Setup(); err != nil {
+		return fmt.Errorf("failed to setup iptables: %v", err)
+	}
+
+	// Start API server
+	s.wg.Add(1)
 	go func() {
-		defer wg.Done()
-		if err := api.Start(ctx, cfg.API); err != nil {
-			logger.Errorf("API error: %v", err)
+		defer s.wg.Done()
+		if err := api.Start(s.ctx, s.cfg.API); err != nil {
+			logger.Errorf("API server error: %v", err)
 		}
 	}()
 
-	wg.Add(1)
+	// Start Proxy server
+	s.wg.Add(1)
 	go func() {
-		defer wg.Done()
-		if err := proxyserver.Start(ctx, cfg.Proxy); err != nil {
-			logger.Errorf("Proxy error: %v", err)
+		defer s.wg.Done()
+		if err := proxyserver.Start(s.ctx, s.cfg.Proxy); err != nil {
+			logger.Errorf("Proxy server error: %v", err)
 		}
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		hubctl.DNSControl(ctx, cfg.DockerContainer)
 	}()
 
 	logger.Successf("Supervisor started successfully")
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	<-sigChan
-	logger.Infof("Shutdown signal received")
-
-	cancel()
-
-	gracefulShutdown()
+	return nil
 }
 
-func gracefulShutdown() {
-	logger.Infof("Initiating graceful shutdown...")
+func (s *Supervisor) Stop() error {
+	s.mu.Lock()
+	if !s.running {
+		s.mu.Unlock()
+		return nil
+	}
+	s.mu.Unlock()
+
+	logger.Infof("Stopping supervisor...")
+
+	// Cancel context
+	s.cancel()
+
+	// Wait for services with timeout
 	done := make(chan struct{})
 	go func() {
-		wg.Wait()
+		s.wg.Wait()
 		close(done)
 	}()
 
 	select {
 	case <-done:
-		logger.Infof("All services stopped gracefully")
-	case <-time.After(ShutdownTimeout):
+		logger.Infof("All services stopped")
+	case <-time.After(10 * time.Second):
 		logger.Warnf("Shutdown timeout, forcing exit")
 	}
 
-	Stop()
-}
-
-func Stop() {
-	mu.Lock()
-	defer mu.Unlock()
-
-	if !running {
-		return
+	// Cleanup iptables
+	if err := s.iptablesMgr.Cleanup(); err != nil {
+		logger.Errorf("iptables cleanup error: %v", err)
 	}
 
-	logger.Infof("Stopping supervisor...")
-	running = false
+	// Stop container
+	stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := s.dockerMgr.Stop(stopCtx); err != nil {
+		logger.Errorf("Failed to stop DNS container: %v", err)
+	}
+
+	// Close docker client
+	if err := s.dockerMgr.Close(); err != nil {
+		logger.Errorf("Failed to close docker client: %v", err)
+	}
+
+	s.mu.Lock()
+	s.running = false
+	s.mu.Unlock()
+
 	logger.Successf("Supervisor stopped successfully")
+	return nil
 }
 
-func IsRunning() bool {
-	mu.Lock()
-	defer mu.Unlock()
-	return running
+func (s *Supervisor) IsRunning() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.running
 }

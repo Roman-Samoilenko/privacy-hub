@@ -1,16 +1,26 @@
+# DNS Server Configuration
 dns:
-  listen: ":8853"
+  listen: ":9000"
   upstreams:
+    - "1.1.1.1:853"           # Cloudflare DoT
+    - "8.8.8.8:853"           # Google DoT
+  doh_upstreams:
     - "https://cloudflare-dns.com/dns-query"
     - "https://dns.google/dns-query"
   timeout: 5s
   cache_size: 10000
   cache_ttl: 3600
+  enable_filtering: true
+  blocklist:
+    - "doubleclick.net"
+  allowlist:
+    - "trusted.example.com"
 
+# HTTP/HTTPS Proxy Configuration
 proxy:
   listen: ":3128"
   filter_headers: true
-  user_agent: "Privacy-Browser/1.0 privacy-hub"
+  user_agent: "Pr-Browser/1.1 pr-hub"
   filter_list_headers:
     - "X-Forwarded-For"
     - "Via"
@@ -24,14 +34,29 @@ proxy:
     - "WL-Proxy-Client-IP"
     - "HTTP_CLIENT_IP"
     - "HTTP_X_FORWARDED_FOR"
+    - "X-Original-Forwarded-For"
+    - "CF-Connecting-IP"
+  mitm_enabled: true
+  mitm_ca_cert: "certs/ca.crt"
+  mitm_ca_key: "certs/ca.key"
 
+# REST API Configuration
 api:
   listen: ":8000"
+  cors_enabled: false
+  rate_limit: 100
+  api_key: ""
 
+# Docker Container Configuration
 docker_container:
   name: "privacy-hub-dns"
   listen: 9000
+  image: "privacy-hub-dns:latest"
   network: "bridge"
   restart_policy: "unless-stopped"
-  
 
+# Logging Configuration
+logging:
+  level: "info"  # debug, info, warn, error
+  output: "stdout"
+  format: "text"  # text, json

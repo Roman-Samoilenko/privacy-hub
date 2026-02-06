@@ -1,0 +1,280 @@
+version: '3'
+
+output: prefixed
+
+vars:
+  PROJECT_NAME: privacy-hub
+  DOCKER_IMAGE: privacy-hub-dns
+  CONTAINER_NAME: privacy-hub-dns
+  BINARY_HOST: privacy-hub
+  BINARY_DNS: dnsserver
+  GO_FLAGS: -ldflags="-w -s"
+  CONFIG_PATH: configs/config.yaml
+
+env:
+  CGO_ENABLED: 0
+  GOOS: linux
+  GOARCH: amd64
+
+dotenv:
+  - .env
+
+tasks:
+  default:
+    desc: "Показать доступные команды"
+    cmds:
+      - task --list
+
+  # ==================== СБОРКА ====================
+  
+  build:
+    desc: "Собрать все компоненты (host + DNS container)"
+    deps:
+      - build:host
+      - build:docker
+    cmds:
+      - echo "✅ Все компоненты собраны"
+
+  build:host:
+    desc: "Собрать host утилиту"
+    cmds:
+      - go mod tidy
+      - go build -mod=mod -ldflags="-w -s" -o privacy-hub ./cmd/privacy-hub
+      - chmod +x privacy-hub
+
+  build:docker:
+    desc: "Собрать DNS Docker-образ"
+    sources:
+      - Dockerfile
+      - cmd/dnsserver/**/*.go
+      - internal/**/*.go
+      - docker-compose.yml
+    cmds:
+      - echo "🐳 Сборка Docker-образа..."
+      - docker-compose build
+      - echo "✅ Docker-образ собран"
+
+  # ==================== ЗАПУСК ====================
+
+  up:
+    desc: "Запустить полный стек (Docker + Host)"
+    deps:
+      - build
+    cmds:
+      - task: docker:up
+      - echo "⏳ Ждем готовности DNS-контейнера (5 сек)..."
+      - sleep 5
+      - echo "🚀 Запуск host-процесса..."
+      - echo "⚠️  Для остановки нажмите Ctrl+C и выполните -> task down"
+      - sudo ./{{.BINARY_HOST}}
+
+  docker:up:
+    desc: "Запустить только DNS-контейнер"
+    cmds:
+      - echo "🐳 Запуск DNS-контейнера..."
+      - docker-compose up -d
+      - echo "✅ DNS-контейнер запущен"
+
+  docker:logs:
+    desc: "Показать логи DNS-контейнера"
+    cmds:
+      - docker-compose logs -f
+
+  # ==================== ОСТАНОВКА ====================
+
+  down:
+    desc: "Остановить все сервисы"
+    cmds:
+      - echo "🛑 Остановка сервисов..."
+      - docker-compose down
+      - echo "✅ Сервисы остановлены"
+
+  stop:
+    desc: "Остановить host-процесс и контейнер"
+    cmds:
+      - task: down
+      - echo "🧹 Очистка iptables правил..."
+      - sudo iptables -t nat -F || true
+      - echo "✅ Все остановлено"
+
+  # ==================== ТЕСТИРОВАНИЕ ====================
+
+  test:
+    desc: "Запустить все тесты"
+    cmds:
+      - echo "🧪 Запуск тестов..."
+      - go test -v -race -coverprofile=coverage.out ./...
+      - go tool cover -html=coverage.out -o coverage.html
+      - echo "✅ Тесты пройдены. Отчет -> coverage.html"
+
+  test:unit:
+    desc: "Только unit-тесты (без интеграционных)"
+    cmds:
+      - go test -v -short ./...
+
+  bench:
+    desc: "Запустить бенчмарки"
+    cmds:
+      - go test -bench=. -benchmem ./internal/dnsresolver
+
+  # ==================== ПРОВЕРКИ ====================
+
+  check:
+    desc: "Проверить работу всех сервисов"
+    cmds:
+      - task: check:api
+      - task: check:dns
+      - task: check:proxy
+
+  check:api:
+    desc: "Проверить API (порт 8000)"
+    cmds:
+      - echo "🔍 Проверка API..."
+      - curl -f http://localhost:8000/health || (echo "❌ API не отвечает" && exit 1)
+      - echo "✅ API работает"
+
+  check:dns:
+    desc: "Проверить DNS-резолвер (порт 9000)"
+    cmds:
+      - echo "🔍 Проверка DNS..."
+      - dig @127.0.0.1 -p 9000 +short google.com || (echo "❌ DNS не работает" && exit 1)
+      - echo "✅ DNS работает"
+
+  check:proxy:
+    desc: "Проверить HTTP-прокси (порт 3128)"
+    cmds:
+      - echo "🔍 Проверка прокси..."
+      - curl -x http://localhost:3128 -s -o /dev/null -w "%{http_code}" http://google.com | grep -q 200 || (echo "❌ Прокси не работает" && exit 1)
+      - echo "✅ Прокси работает"
+
+  check:user-agent:
+    desc: "Проверить подмену User-Agent"
+    cmds:
+      - echo "🔍 Проверка User-Agent..."
+      - curl -x http://localhost:3128 http://ifconfig.me/ua
+      - echo ""
+
+  # ==================== СЕРТИФИКАТЫ ====================
+
+  certs:gen:
+    desc: "Сгенерировать MITM сертификаты"
+    cmds:
+      - echo "🔐 Генерация CA сертификата..."
+      - mkdir -p certs
+      - |
+        openssl genrsa -out certs/ca.key 2048
+        openssl req -new -x509 -days 3650 \
+          -key certs/ca.key \
+          -out certs/ca.crt \
+          -subj "/C=RU/ST=Smolensk/L=Smolensk/O=PrivacyHub/CN=PrivacyHub Root CA"
+      - echo "✅ Сертификаты созданы в certs/"
+      - echo "⚠️  Установите certs/ca.crt в браузер (см. README)"
+
+  certs:install:
+    desc: "Установить CA сертификат в систему (Linux)"
+    preconditions:
+      - test -f certs/ca.crt
+    cmds:
+      - echo "📦 Установка CA в систему..."
+      - sudo cp certs/ca.crt /usr/local/share/ca-certificates/privacy-hub.crt
+      - sudo update-ca-certificates
+      - echo "✅ Сертификат установлен. Перезапустите браузер."
+
+  certs:clean:
+    desc: "Удалить все сертификаты"
+    cmds:
+      - echo "🗑️  Удаление сертификатов..."
+      - rm -rf certs/
+      - echo "✅ Сертификаты удалены"
+
+  certs:install-firefox:
+    desc: "Установить CA сертификат в Firefox"
+    preconditions:
+      - test -f certs/ca.crt
+      - command -v certutil >/dev/null 2>&1 || (echo "❌ Установите: sudo apt install libnss3-tools" && exit 1)
+    vars:
+      CERT_NAME: "PrivacyHub Root CA"
+      CERT_FILE:
+        sh: realpath certs/ca.crt
+    cmds:
+      - |
+        echo "🦊 Установка в Firefox..."
+        for profile in ~/.mozilla/firefox/*.default*; do
+          if [ -d "$profile" ]; then
+            echo "  → Профиль: $(basename $profile)"
+            certutil -A -n "{{.CERT_NAME}}" -t "CT,C,C" -i "{{.CERT_FILE}}" -d sql:"$profile"
+          fi
+        done
+      - echo "✅ Сертификат установлен во все профили Firefox"
+      - echo "⚠️  Перезапустите Firefox"
+
+
+  # ==================== РАЗРАБОТКА ====================
+
+  dev:
+    desc: "Режим разработки (пересборка при изменениях)"
+    deps:
+      - install:air
+    cmds:
+      - air -c .air.toml
+
+  lint:
+    desc: "Запустить линтеры"
+    cmds:
+      - echo "🔍 Проверка кода..."
+      - gofmt -l -s .
+      - go vet ./...
+      - golangci-lint run || echo "⚠️  Установите golangci-lint -> https://golangci-lint.run/usage/install/"
+
+  fmt:
+    desc: "Форматировать код"
+    cmds:
+      - echo "✨ Форматирование..."
+      - gofmt -w -s .
+      - go mod tidy
+      - echo "✅ Код отформатирован"
+
+  # ==================== ОЧИСТКА ====================
+
+  clean:
+    desc: "Очистить все артефакты сборки"
+    cmds:
+      - echo "🧹 Очистка..."
+      - rm -f {{.BINARY_HOST}} {{.BINARY_DNS}}
+      - rm -f coverage.out coverage.html
+      - rm -rf vendor/
+      - docker-compose down -v --remove-orphans || true
+      - echo "✅ Очищено"
+
+  clean:docker:
+    desc: "Удалить Docker-образы проекта"
+    cmds:
+      - docker-compose down --rmi all -v || true
+      - docker image prune -f
+
+  reset:
+    desc: "Полный сброс (очистка + удаление контейнеров)"
+    cmds:
+      - task: stop
+      - task: clean
+      - task: clean:docker
+      - task: certs:clean
+      - echo "🔄 Проект сброшен"
+
+  # ==================== ЛОГИ И МОНИТОРИНГ ====================
+
+  logs:
+    desc: "Показать логи всех компонентов"
+    cmds:
+      - docker-compose logs -f
+
+  ps:
+    desc: "Показать статус всех сервисов"
+    cmds:
+      - echo "📊 Статус сервисов:"
+      - docker-compose ps
+      - echo ""
+      - echo "🔌 Порты:"
+      - sudo netstat -tuln | grep -E '8000|3128|9000' || echo "Нет открытых портов"
+
+ 

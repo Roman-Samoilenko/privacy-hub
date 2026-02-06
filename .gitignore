@@ -1,1 +1,55 @@
+# Переменные окружения
 .env
+.env.*
+!.env.example
+
+# Сертификаты (КРИТИЧНО - никогда не коммитить!)
+certs/
+*.crt
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Бинарные файлы Go
+privacy-hub
+privacy-hub.exe
+dnsserver
+
+# Go сборка и зависимости
+vendor/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go тестирование
+*.test
+*.out
+coverage.out
+coverage.html
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Docker volumes и кеш
+.docker/
+docker-compose.override.yml
+
+# Временные файлы
+*.log
+*.tmp
+tmp/
+temp/
+.task
+
+# OS
+Thumbs.db
+.Spotlight-V100
+.Trashes

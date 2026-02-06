@@ -1,11 +1,28 @@
-version: "3.9"
-
 services:
   dns:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: privacy-hub-dns
     restart: unless-stopped
     ports:
-      - "8853:8853/udp"
+      - "9000:9000/udp"
+      - "9001:9001/tcp"
     volumes:
       - ./configs/config.yaml:/app/config.yaml:ro
+    networks:
+      - privacy-net
+    cap_add:
+      - NET_BIND_SERVICE
+    environment:
+      - LOG_LEVEL=info
+    healthcheck:
+      test: [ "CMD", "nc", "-uz", "localhost", "9000" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+networks:
+  privacy-net:
+    driver: bridge
