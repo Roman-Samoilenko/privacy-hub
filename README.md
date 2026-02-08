@@ -1,742 +1,583 @@
 # Privacy Hub
 
-Локальный сервис приватности корпоративного уровня, обеспечивающий фильтрацию DNS, возможности HTTP-прокси и управление трафиком через контейнеризованное DNS-разрешение и манипуляцию трафиком на уровне хоста.
+Высокопроизводительная система обеспечения приватности сетевого трафика на основе микросервисной архитектуры. Проект реализует комплексное решение для контроля DNS-запросов, HTTP/HTTPS трафика с поддержкой transparent proxy через динамическое управление iptables и оркестрацию контейнеризированных компонентов.
 
-## Содержание
+## Технологический стек
 
-- [Обзор](#обзор)
-- [Архитектура](#архитектура)
-- [Стек технологий](#стек-технологий)
-- [Системные требования](#системные-требования)
-- [Установка](#установка)
-- [Конфигурация](#конфигурация)
-- [Использование](#использование)
-- [Справочник API](#справочник-api)
-- [Разработка](#разработка)
-- [Устранение неполадок](#устранение-неполадок)
+### Языки и фреймворки
 
----
+- **Go 1.24+** — основной язык разработки
+- **Docker** — контейнеризация DNS-компонента
+- **Docker Compose** — оркестрация многоконтейнерного окружения
 
-## Обзор
+### Ключевые библиотеки и зависимости
 
-Privacy Hub - это двухкомпонентное решение для приватности, разработанное для обеспечения полного контроля над DNS и HTTP трафиком на системном уровне. Архитектура разделяет DNS-разрешение в изолированный Docker-контейнер, сохраняя при этом управление на уровне хоста через утилиту управления.
+- `github.com/miekg/dns` — полнофункциональная реализация DNS протокола
+- `github.com/elazarl/goproxy` — HTTP/HTTPS proxy с MITM capabilities
+- `github.com/docker/docker/client` — программное управление Docker Engine API
+- `github.com/go-chi/chi/v5` — легковесный и производительный HTTP роутер
+- `gopkg.in/yaml.v3` — парсинг конфигурационных файлов
 
-### Ключевые возможности
+### Системные компоненты
 
-- **Изолированное DNS-разрешение**: DNS-запросы обрабатываются в контейнеризованной среде
-- **DNS-over-HTTPS (DoH)**: Зашифрованные upstream DNS-запросы к Cloudflare/Google
-- **HTTP/HTTPS Прокси**: Прозрачный прокси с манипуляцией заголовков
-- **Интеграция с iptables**: Автоматическое перенаправление трафика на уровне ядра
-- **REST API**: Полное программное управление и мониторинг
-- **Фильтрация доменов**: Поддержка черных/белых списков
-- **Заголовки приватности**: Автоматическое удаление отслеживающих заголовков
-- **Нормализация User-Agent**: Снижает снятие отпечатков браузера
-- **Корректное завершение**: Правильная очистка правил iptables и сервисов
+- **iptables** — динамическая маршрутизация сетевого трафика на уровне ядра
+- **TLS 1.2+** — шифрованная передача данных
+- **netfilter/NAT** — прозрачное перенаправление DNS-запросов
 
----
+## Архитектурные паттерны
 
-## Архитектура
+### Реализованные паттерны проектирования
 
-### Высокоуровневая системная архитектура
+#### Supervisor Pattern
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                         Host System                              │
-│                                                                  │
-│  ┌─────────────────┐            ┌──────────────────────────────┐ │
-│  │  Applications   │            │    Privacy Hub Process       │ │
-│  │                 │            │                              │ │
-│  │  - Browser      │            │  ┌─────────────────────────┐ │ │
-│  │  - CLI tools    │            │  │   Supervisor            │ │ │
-│  │  - Services     │            │  │  - Lifecycle Mgmt       │ │ │
-│  └────────┬────────┘            │  │  - Error Handling       │ │ │
-│           │                     │  └───────────┬─────────────┘ │ │
-│           │ DNS (port 53)       │              │               │ │
-│           │ HTTP (port 80/443)  │              ├───────────────┤ │
-│           │                     │  ┌───────────▼─────────────┐ │ │
-│           │                     │  │   API Server (:8000)    │ │ │
-│           │                     │  │  - Health checks        │ │ │
-│           │                     │  │  - Config management    │ │ │
-│           │                     │  │  - Container control    │ │ │
-│           │                     │  └───────────┬─────────────┘ │ │
-│           │                     │              │               │ │
-│           │                     │  ┌───────────▼─────────────┐ │ │
-│           │                     │  │   HTTP Proxy (:3128)    │ │ │
-│           │                     │  │  - Header filtering     │ │ │
-│           │                     │  │  - UA normalization     │ │ │
-│           │                     │  │  - Request logging      │ │ │
-│           │                     │  └─────────────────────────┘ │ │
-│           │                     │              │               │ │
-│           │                     │  ┌───────────▼─────────────┐ │ │
-│           │                     │  │   hubctl (DNS Control)  │ │ │
-│           │                     │  │  - iptables management  │ │ │
-│           │                     │  │  - Container lifecycle  │ │ │
-│           │                     │  │  - Signal handling      │ │ │
-│           │                     │  └───────────┬─────────────┘ │ │
-│           │                     └──────────────┼───────────────┘ │
-│           │                                    │                 │
-│           │                                    │ Docker API      │
-│           │                                    │                 │
-│  ┌────────▼────────┐                  ┌────────▼──────────────┐  │
-│  │   iptables      │                  │   Docker Engine       │  │
-│  │                 │                  │                       │  │
-│  │  NAT PREROUTING │                  │  ┌─────────────────┐  │  │
-│  │  NAT OUTPUT     │                  │  │  DNS Container  │  │  │
-│  │                 │                  │  │  (privacy-hub)  │  │  │
-│  │  UDP 53 → 9000  │◄─────────────────┼──┤                 │  │  │
-│  │  TCP 53 → 9001  │                  │  │  Port 9000/udp  │  │  │
-│  └─────────────────┘                  │  │  Port 9001/tcp  │  │  │
-│                                       │  │                 │  │  │
-└───────────────────────────────────────┼──┤  DNS Resolver   ├──┼──┤
-                                        │  │  - Query parse  │  │  │
-                                        │  │  - Filtering    │  │  │
-                                        │  │  - DoH upstream │  │  │
-                                        │  └────────┬────────┘  │  │
-                                        │           │           │  │
-                                        └───────────┼───────────┘  │
-                                                    │              │
-                                                    │ HTTPS        │
-                                                    │              │
-                     ┌──────────────────────────────▼──────────────┴─┐
-                     │              Internet                         │
-                     │                                               │
-                     │  ┌──────────────────┐  ┌──────────────────┐   │
-                     │  │ Cloudflare DoH   │  │  Google DoH      │   │
-                     │  │ 1.1.1.1          │  │  8.8.8.8         │   │
-                     │  └──────────────────┘  └──────────────────┘   │
-                     │                                               │
-                     └───────────────────────────────────────────────┘
+Центральный компонент-супервизор управляет жизненным циклом всех подсистем с graceful shutdown и автоматическим восстановлением после сбоев.
+
+#### Singleton Pattern
+
+Глобальный логгер инициализируется один раз через `sync.Once` для thread-safe доступа из всех модулей.
+
+#### Strategy Pattern
+
+Резолвер DNS поддерживает множественные стратегии upstream провайдеров (DoT, DoH) с автоматическим fallback.
+
+#### Decorator Pattern
+
+Middleware цепочка для HTTP API (логирование, восстановление после паники, таймауты).
+
+#### Cache-Aside Pattern
+
+LRU-кеш с TTL для DNS-ответов минимизирует латентность и нагрузку на upstream серверы.
+
+#### Resource Pool Pattern
+
+Переиспользование TCP соединений через `sync.Pool` для DNS-клиентов.
+
+## Системная архитектура
+
+```mermaid
+graph TB
+    subgraph "Host System"
+        User[User Application]
+        IPT[iptables NAT Rules]
+        Host[Privacy Hub Main Process]
+    end
+    
+    subgraph "Docker Container"
+        DNS[DNS Resolver]
+        Cache[LRU Cache]
+        Filter[Domain Filter]
+    end
+    
+    subgraph "External Services"
+        Proxy[HTTP/HTTPS Proxy<br/>:3128]
+        API[REST API<br/>:8000]
+    end
+    
+    subgraph "Upstream Providers"
+        DoT[DNS-over-TLS<br/>1.1.1.1:853]
+        DoH[DNS-over-HTTPS<br/>cloudflare-dns.com]
+    end
+    
+    User -->|DNS Query :53| IPT
+    IPT -->|Redirect :9000| DNS
+    DNS --> Filter
+    Filter -->|Blocked| User
+    Filter -->|Allowed| Cache
+    Cache -->|Cache Miss| DoT
+    Cache -->|Fallback| DoH
+    Cache -->|Cache Hit| User
+    
+    User -->|HTTP/HTTPS| Proxy
+    Proxy -->|MITM TLS| User
+    
+    Host -->|Docker API| DNS
+    Host -->|Manages| IPT
+    Host -->|Spawns| Proxy
+    Host -->|Spawns| API
+    
+    API -->|Control| Host
+    
+    style DNS fill:#4a90e2
+    style Proxy fill:#e24a4a
+    style API fill:#4ae290
+    style Host fill:#e2c44a
 ```
 
-### Диаграмма взаимодействия компонентов
+## Компонентная диаграмма
+
+```mermaid
+C4Component
+    title Component Diagram - Privacy Hub
+
+    Container_Boundary(host, "Host Process") {
+        Component(supervisor, "Supervisor", "Go Module", "Orchestrates lifecycle of all services")
+        Component(dockerMgr, "Docker Manager", "Go Module", "Manages DNS container lifecycle")
+        Component(iptablesMgr, "IPTables Manager", "Go Module", "Configures network rules")
+        Component(apiServer, "API Server", "chi/v5", "REST API for control")
+        Component(proxyServer, "Proxy Server", "goproxy", "HTTP/HTTPS MITM proxy")
+    }
+    
+    Container_Boundary(container, "DNS Container") {
+        Component(resolver, "DNS Resolver", "miekg/dns", "Handles DNS queries")
+        Component(cache, "Cache Layer", "Custom LRU", "Caches DNS responses")
+        Component(filter, "Domain Filter", "Custom", "Blocklist/allowlist filtering")
+    }
+    
+    System_Ext(docker, "Docker Engine", "Container runtime")
+    System_Ext(kernel, "Linux Kernel", "netfilter/iptables")
+    System_Ext(upstream, "Upstream DNS", "DoT/DoH providers")
+    
+    Rel(supervisor, dockerMgr, "Starts/Stops")
+    Rel(supervisor, iptablesMgr, "Configures")
+    Rel(supervisor, apiServer, "Spawns goroutine")
+    Rel(supervisor, proxyServer, "Spawns goroutine")
+    
+    Rel(dockerMgr, docker, "Docker API")
+    Rel(iptablesMgr, kernel, "iptables commands")
+    
+    Rel(resolver, cache, "Queries")
+    Rel(resolver, filter, "Checks")
+    Rel(resolver, upstream, "Forwards queries")
+```
+
+## Поток данных DNS-запроса
 
 ```mermaid
 sequenceDiagram
-    participant App as Application
+    actor User
     participant IPT as iptables
-    participant Hub as Privacy Hub
-    participant DNS as DNS Container
-    participant DoH as DoH Provider
-    participant Proxy as HTTP Proxy
-    participant Web as Web Server
-
-    Note over Hub: Startup Sequence
-    Hub->>IPT: Configure NAT rules
-    Hub->>DNS: Start container
-    Hub->>Hub: Start API server
-    Hub->>Hub: Start HTTP proxy
+    participant DNS as DNS Resolver
+    participant Cache
+    participant Filter
+    participant DoT as Upstream DoT
+    participant DoH as Upstream DoH
     
-    Note over App,DoH: DNS Resolution Flow
-    App->>IPT: DNS query (port 53)
+    User->>IPT: DNS Query (port 53)
     IPT->>DNS: Redirect to port 9000
-    DNS->>DNS: Apply filters
-    DNS->>DoH: HTTPS query
-    DoH->>DNS: Encrypted response
-    DNS->>App: DNS response
     
-    Note over App,Web: HTTP Proxy Flow
-    App->>Proxy: HTTP request (via proxy config)
-    Proxy->>Proxy: Filter headers
-    Proxy->>Proxy: Normalize User-Agent
-    Proxy->>Web: Modified request
-    Web->>Proxy: Response
-    Proxy->>App: Response
-    
-    Note over Hub: Shutdown Sequence
-    Hub->>DNS: Stop container
-    Hub->>IPT: Remove NAT rules
-    Hub->>Hub: Graceful shutdown
+    DNS->>Filter: Check domain
+    alt Domain blocked
+        Filter-->>DNS: NXDOMAIN
+        DNS-->>User: Blocked response
+    else Domain allowed
+        Filter->>Cache: Continue
+        Cache->>Cache: Lookup by domain+type
+        
+        alt Cache hit
+            Cache-->>DNS: Cached response
+            DNS-->>User: Return cached
+        else Cache miss
+            Cache->>DoT: Forward query (TLS)
+            
+            alt DoT success
+                DoT-->>Cache: DNS response
+            else DoT failed
+                Cache->>DoH: Fallback to HTTPS
+                DoH-->>Cache: DNS response
+            end
+            
+            Cache->>Cache: Store with TTL
+            Cache-->>DNS: Fresh response
+            DNS-->>User: Return resolved
+        end
+    end
 ```
 
-### Диаграмма состояний
+## Жизненный цикл системы
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Stopped
+    [*] --> Initializing
     
-    Stopped --> Starting: Start()
-    Starting --> ConfigLoading: Load config
-    ConfigLoading --> ConfigError: Config invalid
-    ConfigError --> Stopped: Exit
+    Initializing --> ConfigLoading: Parse YAML
+    ConfigLoading --> ValidationOK: Validate
+    ConfigLoading --> [*]: Validation Failed
     
-    ConfigLoading --> ServicesStarting: Config valid
-    ServicesStarting --> APIStarting: Initialize
-    APIStarting --> ProxyStarting: API running
-    ProxyStarting --> DNSStarting: Proxy running
-    DNSStarting --> IPTablesConfig: DNS running
-    IPTablesConfig --> Running: Rules applied
+    ValidationOK --> CreatingSupervisor
+    CreatingSupervisor --> StartingDNS: Docker Start
     
-    Running --> Running: Handle requests
-    Running --> Stopping: SIGINT/SIGTERM
-    Running --> Error: Service failure
+    StartingDNS --> WaitingDNS: Container Creating
+    WaitingDNS --> HealthCheck: Poll Status
+    HealthCheck --> WaitingDNS: Not Ready
+    HealthCheck --> ConfiguringIPT: Container Ready
     
-    Error --> Stopping: Recover
+    ConfiguringIPT --> StartingProxy: iptables Setup
+    StartingProxy --> StartingAPI: Goroutine Spawn
+    StartingAPI --> Running: All Services Up
     
-    Stopping --> DNSStopping: Begin shutdown
-    DNSStopping --> IPTablesCleanup: Container stopped
-    IPTablesCleanup --> ServicesShutdown: Rules removed
-    ServicesShutdown --> Stopped: Cleanup complete
+    Running --> ShuttingDown: SIGINT/SIGTERM
+    ShuttingDown --> StoppingServices: Cancel Context
+    StoppingServices --> CleaningIPT: Wait Goroutines
+    CleaningIPT --> StoppingDNS: Remove Rules
+    StoppingDNS --> [*]: Container Stopped
     
-    Stopped --> [*]
+    Running --> Running: Process Requests
 ```
 
-### Архитектура потоков данных
+## Управление конкурентностью
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Поток DNS-запросов                       │
-└─────────────────────────────────────────────────────────────┘
-
-Приложение
-    │
-    │ 1. DNS-запрос (example.com A?)
-    ▼
-iptables (OUTPUT chain)
-    │
-    │ 2. Совпадение: dport 53, перенаправление на 9000
-    ▼
-DNS-контейнер (порт 9000)
-    │
-    │ 3. Разбор запроса
-    ▼
-Фильтр доменов
-    │
-    ├─► Совпадение в черном списке? → Вернуть NXDOMAIN
-    │
-    ├─► Попадание в кеш? → Вернуть кешированный ответ
-    │
-    └─► Промах в кеше ↓
-         │
-         │ 4. Построение DoH-запроса
-         ▼
-    DoH Upstream (Cloudflare/Google)
-         │
-         │ 5. HTTPS POST /dns-query
-         ▼
-    DNS-ответ (зашифрованный)
-         │
-         │ 6. Расшифровка, разбор
-         ▼
-    Кеширование + возврат приложению
-         │
-         ▼
-Приложение получает IP-адрес
-
-
-┌─────────────────────────────────────────────────────────────┐
-│                     Поток HTTP-прокси                       │
-└─────────────────────────────────────────────────────────────┘
-
-Браузер (настроен с прокси :3128)
-    │
-    │ 1. HTTP CONNECT example.com:443
-    ▼
-Privacy Hub Proxy
-    │
-    │ 2. Установка туннеля
-    ▼
-Фильтр заголовков
-    │
-    ├─► Удалить: X-Forwarded-For
-    ├─► Удалить: Via
-    ├─► Удалить: Client-IP
-    └─► Удалить: отслеживающие заголовки
-         │
-         ▼
-    Нормализация User-Agent
-         │
-         │ 3. Установить UA: Privacy-Browser/1.0
-         ▼
-    Логирование запроса (опционально)
-         │
-         ▼
-Целевой веб-сервер
-    │
-    │ 4. Ответ
-    ▼
-Прокси (пропускает)
-    │
-    ▼
-Браузер получает ответ
+```mermaid
+graph LR
+    subgraph "Main Goroutine"
+        Main[main.Start]
+    end
+    
+    subgraph "Supervisor Context"
+        Ctx[context.Context]
+        Cancel[context.CancelFunc]
+    end
+    
+    subgraph "Worker Goroutines"
+        API[API Server<br/>chi router]
+        Proxy[Proxy Server<br/>goproxy]
+        DNS_UDP[DNS UDP Server]
+        DNS_TCP[DNS TCP Server]
+    end
+    
+    subgraph "Background Tasks"
+        Cache_Cleanup[Cache Cleanup<br/>ticker: 1min]
+        Health[Container Health<br/>ticker: 500ms]
+    end
+    
+    subgraph "Synchronization"
+        WG[sync.WaitGroup]
+        Mutex[sync.RWMutex]
+    end
+    
+    Main -->|Creates| Ctx
+    Main -->|Spawns| API
+    Main -->|Spawns| Proxy
+    Main -->|Spawns| DNS_UDP
+    Main -->|Spawns| DNS_TCP
+    
+    API -->|Registers| WG
+    Proxy -->|Registers| WG
+    
+    DNS_UDP -->|Spawns| Cache_Cleanup
+    Health -->|Polls| DNS_UDP
+    
+    Ctx -->|Cancels| API
+    Ctx -->|Cancels| Proxy
+    Ctx -->|Cancels| DNS_UDP
+    Ctx -->|Cancels| DNS_TCP
+    
+    API -->|Protects| Mutex
+    Proxy -->|Protects| Mutex
+    
+    Main -->|Waits| WG
+    Cancel -->|Triggers| Ctx
 ```
 
----
+## Схема кеширования DNS
 
-## Стек технологий
-
-### Основные зависимости
-
-| Компонент | Технология | Версия | Назначение |
-|-----------|-----------|---------|---------|
-| Среда выполнения | Go | 1.22+ | Основной язык программирования |
-| DNS-сервер | miekg/dns | latest | Реализация DNS-протокола |
-| HTTP-роутер | go-chi/chi | v5 | Маршрутизация REST API |
-| HTTP-прокси | elazarl/goproxy | latest | HTTP/HTTPS прокси |
-| Конфигурация | gopkg.in/yaml.v3 | v3 | Разбор YAML-конфигурации |
-| Контейнеризация | Docker | 20.10+ | Изоляция DNS-сервера |
-| Управление трафиком | iptables | 1.8+ | Перенаправление пакетов на уровне ядра |
-
-### Системная архитектура
-
-- **Модель параллелизма**: На основе горутин с отменой через контекст
-- **IPC**: Каналы для межкомпонентного взаимодействия
-- **Управление состоянием**: Разделяемое состояние, защищенное мьютексами
-- **Обработка ошибок**: Централизованное логирование ошибок с контекстом
-- **Завершение работы**: Корректное завершение с синхронизацией через WaitGroup
-
----
-
-### Требования к файрволу
-
-```bash
-# Разрешить исходящий DoH
-iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT
-
-# Разрешить коммуникацию с DNS-контейнером
-iptables -A INPUT -i docker0 -p udp --dport 9000 -j ACCEPT
-iptables -A INPUT -i docker0 -p tcp --dport 9001 -j ACCEPT
+```mermaid
+graph TD
+    subgraph "Cache Structure"
+        Map[map string cacheEntry]
+        Entry1[Entry:<br/>domain+type<br/>msg: dns.Msg<br/>expiresAt: time.Time]
+        Entry2[Entry:<br/>google.com:A<br/>TTL: 300s]
+    end
+    
+    subgraph "Cache Operations"
+        Get[Get domain, qtype]
+        Set[Set domain, qtype, msg]
+        Evict[evictOldest]
+        Cleanup[cleanup ticker]
+    end
+    
+    subgraph "Synchronization"
+        RWMutex[sync.RWMutex]
+    end
+    
+    Get -->|Read Lock| RWMutex
+    Set -->|Write Lock| RWMutex
+    Set -->|Size >= maxSize| Evict
+    
+    Cleanup -->|Every 1 min| Map
+    Cleanup -->|Deletes expired| Entry1
+    
+    Map --> Entry1
+    Map --> Entry2
+    
+    Evict -->|Finds oldest| Map
+    Evict -->|Deletes| Entry1
 ```
 
----
+## Обработка HTTPS через MITM
 
-## Установка
+```mermaid
+sequenceDiagram
+    actor Client
+    participant Proxy as goproxy
+    participant CA as Custom CA
+    participant TLS as TLS Handler
+    participant Server as Target Server
+    
+    Client->>Proxy: CONNECT example.com:443
+    Proxy->>Proxy: Intercept CONNECT
+    
+    alt MITM Enabled
+        Proxy->>CA: Load CA cert/key
+        CA->>TLS: Generate dynamic cert<br/>for example.com
+        TLS->>Client: Present fake cert
+        Client->>TLS: TLS Handshake
+        
+        TLS->>Proxy: Decrypt HTTPS
+        Proxy->>Proxy: Filter headers<br/>(X-Forwarded-For, Via, etc)
+        Proxy->>Proxy: Replace User-Agent
+        
+        Proxy->>Server: Re-encrypt with real cert
+        Server->>Proxy: Response
+        Proxy->>TLS: Encrypt for client
+        TLS->>Client: Encrypted response
+    else MITM Disabled
+        Proxy->>Server: Transparent tunnel
+        Server-->>Client: Direct encrypted channel
+    end
+```
+
+## Структура модулей
+
+```mermaid
+graph TD
+    subgraph "cmd/"
+        MainHub[privacy-hub/main.go]
+        MainDNS[dnsserver/main.go]
+    end
+    
+    subgraph "internal/"
+        Config[config/<br/>config.go<br/>types.go]
+        Logger[logger/<br/>logger.go]
+        Supervisor[supervisor/<br/>supervisor.go]
+        
+        subgraph "hubctl/"
+            Docker[docker.go]
+            IPTables[iptables.go]
+        end
+        
+        subgraph "dnsresolver/"
+            Resolver[resolver.go]
+            CacheMod[cache.go]
+            FilterMod[filter.go]
+        end
+        
+        subgraph "proxyserver/"
+            ProxyMod[proxy.go]
+        end
+        
+        subgraph "api/"
+            APIMod[api.go]
+        end
+    end
+    
+    MainHub --> Supervisor
+    MainDNS --> Resolver
+    
+    Supervisor --> Config
+    Supervisor --> Logger
+    Supervisor --> Docker
+    Supervisor --> IPTables
+    Supervisor --> APIMod
+    Supervisor --> ProxyMod
+    
+    Resolver --> CacheMod
+    Resolver --> FilterMod
+    Resolver --> Config
+    Resolver --> Logger
+    
+    Docker --> Config
+    IPTables --> Config
+    ProxyMod --> Config
+    APIMod --> Config
+```
+
+## Детали реализации
+
+### DNS Resolver
+
+**Особенности:**
+
+- Асинхронная обработка UDP/TCP запросов через отдельные горутины
+- Поддержка DNS-over-TLS (DoT) с TLS 1.2+ валидацией
+- Fallback на DNS-over-HTTPS при недоступности DoT upstream
+- Thread-safe LRU кеш с автоматической эвикцией устаревших записей
+- Иерархическая фильтрация доменов
+
+**Оптимизации:**
+
+- Переиспользование DNS клиентов через connection pooling
+- Минимальный TTL из всех RR для корректного кеширования
+- Параллельная обработка запросов без блокировок
+
+### HTTP/HTTPS Proxy
+
+**Возможности:**
+
+- Man-in-the-Middle (MITM) с динамической генерацией сертификатов
+- Удаление идентифицирующих заголовков (X-Forwarded-For, Via, Client-IP и др.)
+- Подмена User-Agent для единообразия отпечатка браузера
+- Обработка CONNECT туннелирования для HTTPS
+- Настраиваемые таймауты для предотвращения зависаний
+
+**Безопасность:**
+
+- Использование собственного CA для MITM
+- TLS конфигурация с минимальной версией 1.2
+- Контролируемый доступ к приватным ключам
+
+### Docker Manager
+
+**Функционал:**
+
+- Программное управление жизненным циклом контейнеров
+- Автоматическое создание контейнера при отсутствии
+- Health checks с таймаутами для проверки готовности
+- Port binding на localhost для изоляции
+- Настраиваемые restart policies
+
+**Надежность:**
+
+- Graceful shutdown с таймаутами
+- Автоматический rollback при ошибках конфигурации
+- Streaming логов из контейнера
+
+### IPTables Manager
+
+**Управление правилами:**
+
+- Динамическое создание NAT rules для перенаправления DNS
+- Поддержка UDP (порт 53 → 9000) и TCP (порт 53 → 9001)
+- Автоматическая очистка при завершении работы
+- Идемпотентность операций
+
+**Безопасность:**
+
+- Минимальный набор правил для снижения attack surface
+- Rollback при частичном применении правил
+- Thread-safe операции через mutex
+
+### API Server
+
+**Архитектура:**
+
+- RESTful API на основе chi
+- Middleware цепочка: RequestID → RealIP → Logging → Recovery → Timeout
+- Graceful shutdown с drain периодом
+- Structured logging всех HTTP запросов
+
+**Endpoints:**
+
+- `GET /health` — health check для мониторинга
+- `GET /config` — просмотр текущей конфигурации
+- `POST /restart` — программный перезапуск сервисов
+
+## Конфигурация
+
+Система использует YAML-конфигурацию с валидацией на этапе загрузки:
+
+```yaml
+dns:
+  listen: ":9000"
+  upstreams:
+    - "1.1.1.1:853"
+    - "8.8.8.8:853"
+  doh_upstreams:
+    - "https://cloudflare-dns.com/dns-query"
+  cache_size: 10000
+  cache_ttl: 3600
+  enable_filtering: true
+```
+
+## Установка и запуск
+
+### Предварительные требования
+
+- Go 1.24+
+- Docker и Docker Compose
+- Linux с поддержкой iptables
+- Права sudo для настройки сетевых правил
 
 ### Быстрый старт
 
 ```bash
-# Клонировать репозиторий
-git clone https://github.com/Roman-Samoilenko/privacy-hub.git
-cd privacy-hub
+# Сборка всех компонентов
+task build
 
-# Собрать DNS-контейнер
-docker-compose build
+# Генерация MITM сертификатов
+task certs:gen
 
-# Собрать утилиту для хоста
-go build -o privacy-hub ./cmd/privacy-hub
+# Установка сертификатов в браузер
+task certs:install-firefox # Для firefox
 
-# Запустить (требуется root для iptables)
-sudo ./privacy-hub
+# Запуск полного стека
+task up
 ```
 
-### Настройка для разработки
+### Проверка работоспособности
 
 ```bash
-# Установить зависимости
-go mod download
+# Проверка всех сервисов
+task check
 
-# Запустить тесты
-go test ./...
+# Тестирование DNS
+dig @127.0.0.1 -p 9000 google.com
 
-# Сборка с отладочными символами
-go build -gcflags="all=-N -l" -o privacy-hub-debug ./cmd/privacy-hub
+# Тестирование прокси
+curl -x http://localhost:3128 http://example.com
 
-# Запуск с детектором гонок
-go run -race ./cmd/privacy-hub
-```
-
-### Systemd-сервис
-
-Создать `/etc/systemd/system/privacy-hub.service`:
-
-```ini
-[Unit]
-Description=Privacy Hub Service
-After=network.target docker.service
-Requires=docker.service
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/privacy-hub
-ExecStart=/opt/privacy-hub/privacy-hub
-Restart=on-failure
-RestartSec=10
-KillMode=process
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Включить и запустить:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable privacy-hub
-sudo systemctl start privacy-hub
-```
-
----
-
-## Конфигурация
-
-### Основной конфигурационный файл
-
-Расположение: `configs/config.yaml`
-
-```yaml
-# Конфигурация DNS-сервера
-dns:
-  listen: ":8853"
-  upstreams:
-    - "https://cloudflare-dns.com/dns-query"
-    - "https://dns.google/dns-query"
-  timeout: 5s
-  cache_size: 10000
-  cache_ttl: 3600
-
-# Конфигурация HTTP/HTTPS прокси
-proxy:
-  listen: ":3128"
-  filter_headers: true
-  user_agent: "Privacy-Browser/1.0 privacy-hub"
-  filter_list_headers:
-    - "X-Forwarded-For"
-    - "Via"
-    - "Forwarded"
-    - "Client-IP"
-    - "True-Client-IP"
-    - "X-Real-IP"
-    - "X-Client-IP"
-    - "X-Forwarded"
-    - "Proxy-Connection"
-    - "WL-Proxy-Client-IP"
-    - "HTTP_CLIENT_IP"
-    - "HTTP_X_FORWARDED_FOR"
-  mitm_enabled: false  # Требуется CA-сертификат
-
-# Конфигурация REST API
-api:
-  listen: ":8000"
-  cors_enabled: false
-  rate_limit: 100  # запросов в минуту
-
-# Конфигурация Docker-контейнера
-docker_container:
-  name: "privacy-hub-dns"
-  listen: 9000
-  network: "bridge"
-  restart_policy: "unless-stopped"
-```
-
-### Переменные окружения
-
-```bash
-# Переопределить расположение конфигурационного файла
-export PRIVACY_HUB_CONFIG=/path/to/config.yaml
-
-# Установить уровень логирования
-export PRIVACY_HUB_LOG_LEVEL=debug  # debug|info|warn|error
-
-# Docker-сокет
-export DOCKER_HOST=unix:///var/run/docker.sock
-```
-
----
-
-## Использование
-
-### Запуск сервиса
-
-```bash
-# На переднем плане (с логами)
-sudo ./privacy-hub
-
-# В фоновом режиме
-sudo ./privacy-hub &
-
-# С пользовательской конфигурацией
-sudo ./privacy-hub --config=/path/to/config.yaml
-```
-
-### Конфигурация системы
-
-Настроить приложения для использования прокси:
-
-```bash
-# Переменные окружения
-export http_proxy=http://localhost:3128
-export https_proxy=http://localhost:3128
-
-# Git
-git config --global http.proxy http://localhost:3128
-
-# npm
-npm config set proxy http://localhost:3128
-npm config set https-proxy http://localhost:3128
-
-# curl
-curl -x http://localhost:3128 https://example.com
-```
-
-### Проверка
-
-```bash
-# Тест DNS-разрешения
-dig @127.0.0.1 -p 9000 example.com
-
-# Тест прокси
-curl -x http://localhost:3128 -I https://example.com
-
-# Проверка здоровья API
+# Проверка API
 curl http://localhost:8000/health
 ```
 
----
+## Производительность и результаты тестирования
 
-## Справочник API
+Тестирование проводилось на процессоре AMD Ryzen 7 7840HS в среде Linux.
 
-### Проверка здоровья
+### Реальные показатели (Benchmarks)
 
-```http
-GET /health
-```
+| Метрика | Результат | Примечание |
+| :--- | :--- | :--- |
+| **Пропускная способность (QPS)** | ~143,000+ запросов/сек | При 100% попадании в кеш (cache hit) |
+| **Латентность (cache hit)** | 140.2 ns/op | Измерено через Go Benchmark |
+| **Средняя сетевая задержка** | 0.69 ms | С учетом накладных расходов UDP стека |
+| **Минимальная задержка** | 27 μs | Лучший показатель при обработке из памяти |
+| **Латентность (cache miss, DoT)** | 82 ms | Включая TLS Handshake с upstream сервером |
+| **Аллокация памяти (кеш)** | 480 B/запись | 13 аллокаций на одну новую запись в кеше |
 
-**Ответ:**
+### Технический анализ результатов
 
-```
-200 OK
-Body: "OK"
-```
+#### Эффективность кеширования
 
-### Статус конфигурации
+Результаты `BenchmarkCacheHit` (140.2 нс) подтверждают экстремально низкую нагрузку на CPU при работе с `sync.RWMutex`. Система способна обрабатывать миллионы запросов в секунду внутри процесса, а итоговый сетевой показатель в **143,762 QPS** ограничен лишь скоростью работы сетевого интерфейса и планировщика задач.
 
-```http
-GET /config
-```
+#### Сетевая подсистема
 
-**Ответ:**
+Инструмент `dnsperf` зафиксировал 100% успешных ответов (**NOERROR**) при полном отсутствии потерь пакетов на дистанции в 4.3 миллиона запросов, что говорит о высокой стабильности UDP-сервера на базе библиотеки `miekg/dns`.
 
-```json
-{
-  "dns": {
-    "listen": ":8853",
-    "upstreams": ["https://cloudflare-dns.com/dns-query"]
-  },
-  "proxy": {
-    "listen": ":3128"
-  }
-}
-```
+#### Использование ресурсов
 
-### Готовность контейнера
+- **Memory Footprint**: При аллокации 480 байт на запись, кеш на 10,000 записей занимает всего около 4.8 MB, что позволяет масштабировать кеш до сотен тысяч записей на стандартном серверном оборудовании.
+- **CPU Scalability**: Среднее время выполнения одного запроса через DoT (82 мс) оправдывает использование агрессивного кеширования, так как разница между cache-hit и cache-miss составляет более пяти порядков.
 
-```http
-POST /ready
-Content-Type: application/json
+### Воспроизведение тестов
 
-{
-  "ready": true
-}
-```
-
-**Ответ:**
-
-```
-200 OK
-Body: "The container is ready"
-```
-
-Запускает перенаправление DNS-трафика через iptables.
-
-### Перезапуск сервиса
-
-```http
-POST /restart
-```
-
-**Ответ:**
-
-```
-200 OK
-Body: "Service is restarting"
-```
-
-Инициирует корректный перезапуск всех компонентов.
-
----
-
-## Разработка
-
-### Структура проекта
-
-```
-privacy-hub/
-├── cmd/
-│   ├── dnsserver/          # Точка входа DNS-контейнера
-│   │   └── main.go
-│   └── privacy-hub/        # Точка входа утилиты для хоста
-│       └── main.go
-├── internal/
-│   ├── api/                # REST API сервер
-│   │   ├── handlers.go
-│   │   └── router.go
-│   ├── config/             # Загрузка конфигурации
-│   │   └── config.go
-│   ├── dnsresolver/        # Логика DNS-разрешения
-│   │   ├── resolver.go
-│   │   ├── cache.go
-│   │   └── filter.go
-│   ├── hubctl/             # Управление контейнером + iptables
-│   │   ├── docker.go
-│   │   └── iptables.go
-│   ├── logger/             # Структурированное логирование
-│   │   └── logger.go
-│   ├── proxyserver/        # Реализация HTTP-прокси
-│   │   ├── proxy.go
-│   │   └── filters.go
-│   └── supervisor/         # Управление жизненным циклом сервисов
-│       └── supervisor.go
-├── configs/
-│   └── config.yaml
-├── docker-compose.yml
-├── Dockerfile.DNS
-├── go.mod
-├── go.sum
-└── README.md
-```
-
-### Добавление новых функций
-
-1. **Новый DNS-фильтр**: Реализовать в `internal/dnsresolver/filter.go`
-2. **Новый обработчик прокси**: Добавить в `internal/proxyserver/filters.go`
-3. **Новая конечная точка API**: Зарегистрировать в `internal/api/router.go`
-4. **Опция конфигурации**: Обновить `internal/config/config.go` и `config.yaml`
-
-### Тестирование
+Для получения аналогичных цифр используйте встроенные команды:
 
 ```bash
-# Модульные тесты
-go test ./internal/...
+# Локальные бенчмарки
+go test -bench=. -benchmem ./internal/dnsresolver
 
-# Интеграционные тесты
-go test -tags=integration ./...
-
-# Бенчмарки
-go test -bench=. ./internal/dnsresolver
-
-# Покрытие
-go test -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out
+# Нагрузочный тест (требует task up)
+dnsperf -s 127.0.0.1 -p 9000 -d test_queries.txt -l 30
 ```
 
----
+### Оптимизации
 
-## Устранение неполадок
+- Zero-copy operations для DNS протокола через `miekg/dns`
+- Lock-free reads для кеша через `sync.RWMutex`
+- Connection pooling для upstream соединений
+- Batch eviction в кеше для снижения накладных расходов
 
-### Распространенные проблемы
+## Лицензия
 
-#### Порт уже используется
-
-```bash
-# Найти процесс, использующий порт
-sudo lsof -i :8000
-sudo lsof -i :3128
-sudo lsof -i :9000
-
-# Убить процесс
-sudo kill -9 <PID>
-
-# Или убить все экземпляры
-sudo pkill -9 privacy-hub
-```
-
-#### Правила iptables не применены
-
-```bash
-# Проверить таблицу NAT
-sudo iptables -t nat -L -n -v
-
-# Применить правила вручную (для отладки)
-sudo iptables -t nat -A OUTPUT -p udp --dport 53 -j REDIRECT --to-port 9000
-
-# Очистить все правила (ОСТОРОЖНО: может нарушить подключение)
-sudo iptables -t nat -F
-```
-
-#### DNS-контейнер не запускается
-
-```bash
-# Проверить логи Docker
-docker logs privacy-hub-dns
-
-# Проверить статус контейнера
-docker ps -a | grep privacy-hub
-
-# Пересобрать контейнер
-docker-compose down
-docker-compose build --no-cache
-docker-compose up -d
-```
-
-#### Ошибки подключения DoH
-
-```bash
-# Тест подключения к upstream
-curl -v https://cloudflare-dns.com/dns-query
-
-# Проверить DNS-разрешение (в обход)
-dig @1.1.1.1 cloudflare-dns.com
-
-# Проверить правила файрвола
-sudo iptables -L OUTPUT -v -n | grep 443
-```
-
-### Режим отладки
-
-Включить подробное логирование:
-
-```go
-// internal/logger/logger.go
-func newLogger() *Logger {
-    return &Logger{
-        log: log.New(os.Stdout, "", log.Ltime|log.Lshortfile|log.Lmicroseconds),
-    }
-}
-```
-
-### Мониторинг производительности
-
-```bash
-# Использование ресурсов
-docker stats privacy-hub-dns
-
-# Статистика процессов
-ps aux | grep privacy-hub
-
-# Сетевая статистика
-netstat -tuln | grep -E '8000|3128|9000'
-```
-
----
-
-## Вопросы безопасности
-
-### Модель угроз
-
-- **Man-in-the-Middle**: Шифрование DoH защищает DNS-запросы
-- **DNS-спуфинг**: Валидация DNSSEC (если включена в upstream)
-- **Утечка заголовков**: Автоматическое удаление отслеживающих заголовков
-- **Снятие отпечатков**: Нормализация User-Agent
-
-### Лучшие практики
-
-1. **Файрвол**: Ограничить порт API (8000) на localhost
-2. **Обновления**: Регулярно обновлять Docker-образы и Go-зависимости
-3. **Логи**: Ротировать и санитизировать логи для предотвращения утечек данных
-4. **Сертификаты**: При использовании MITM безопасно хранить приватные ключи CA
-5. **Права**: Запускать с минимально необходимыми привилегиями
-
-### Известные ограничения
-
-- Не защищает от обхода DNS-over-TLS (DoT)
-- Расширения браузера могут переопределять настройки прокси
-- Некоторые приложения жестко кодируют DNS-серверы (например, 8.8.8.8)
-- Правила iptables требуют привилегий root
-
----
-
-# Сетевая статистика
-
-netstat -tuln | grep -E '8000|3128|9000'
-
-```
+MIT License

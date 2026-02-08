@@ -1,0 +1,7 @@
+google.com A
+dzen.ru A
+github.com A
+stackoverflow.com A
+reddit.com A
+wikipedia.org A
+vk.com A
